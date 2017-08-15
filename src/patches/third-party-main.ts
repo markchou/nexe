@@ -74,7 +74,24 @@ fs.readFileSync = function readFileSync (file, options) {
   fs.closeSync(fd)
   const contents = Buffer.from(result.toString(), 'base64')
   return encoding ? contents.toString(encoding) : contents
-}`.trim()
+}
+
+const sizeOffset = fs.statSync(process.execPath).size - 10
+const fd = fs.openSync(process.execPath, 'r')
+const contentLength = Buffer.alloc(10)
+fs.readSync(fd, contentLength, 0, 10, sizeOffset)
+const contentSize = Number.parseInt(contentLength.toString(), 10)
+const contentBuffer = Buffer.alloc(contentSize)
+fs.readSync(fd, contentBuffer, 0, contentSize, sizeOffset - contentSize)
+fs.closeSync(fd)
+
+require('vm')
+  .runInThisContext(contentBuffer.toString(), {
+    filename: '${compiler.options.name}.js',
+    lineOffset: 0,
+    displayErrors: true
+  });
+`.trim()
   )
   return next()
 }

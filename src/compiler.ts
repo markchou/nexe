@@ -188,37 +188,6 @@ export class NexeCompiler {
     return header
   }
 
-  private async _getExistingBinaryHeaderAsync(target: string | undefined | null) {
-    const filename = this._getNodeExecutableLocation(target)
-    const existingBinary = await pathExistsAsync(filename)
-    if (existingBinary) {
-      return this._extractHeaderAsync(filename)
-    }
-    return null
-  }
-
-  private _extractHeaderAsync(path: string): Promise<NexeHeader> {
-    const binary = createReadStream(path)
-    const haystack = new Needle(needle)
-    let needles = 0
-    let stackCache: Buffer[] = []
-    return new Promise((resolve, reject) => {
-      binary
-        .on('error', reject)
-        .pipe(haystack)
-        .on('error', reject)
-        .on('close', () => reject(new Error(`Binary: ${path} is not compatible with nexe`)))
-        .on('haystack', (x: Buffer) => needles && stackCache.push(x))
-        .on('needle', () => {
-          if (++needles === 2) {
-            resolve(JSON.parse(Buffer.concat(stackCache).toString()))
-            binary.close()
-            haystack.end()
-          }
-        })
-    })
-  }
-
   private _serializeHeader(header: NexeHeader) {
     return `/**${marker}${JSON.stringify(header)}${marker}**/process.__nexe=${JSON.stringify(
       header
@@ -228,62 +197,39 @@ export class NexeCompiler {
   async setMainModule(compiler: NexeCompiler, next: () => Promise<void>) {
     await next()
     const header = compiler._generateHeader()
-    const contents = inflate(this._getPayload(header), +header.paddingSize) + tail
-    const file = await compiler.readFileAsync('lib/_third_party_main.js')
-    file.contents += '\n' + contents
-    const mod = Buffer.byteLength(file.contents) % 16
-    if (mod) {
-      file.contents += ' '.repeat(16 - mod)
-    }
+    const contents = this._getPayload(header)
   }
 
   async compileAsync() {
     const step = (this.compileStep = this.log.step('Compiling result'))
     let target = this.options.targets.slice().shift()
-    let prebuiltBinary = null
+    let binary = null
     const header = this._generateHeader()
     target = target && `${target}-${header.version.slice(0, 6)}`
     step.log(`Scanning existing binary...`)
-    const existingHeader = await this._getExistingBinaryHeaderAsync(target)
-    if (existingHeader && existingHeader.version === header.version) {
-      const location = this._getNodeExecutableLocation(target)
-      step.log(`Source already built: ${location}`)
-      prebuiltBinary = createReadStream(location)
-    }
+
     if (target) {
       throw new Error('\nNot Implemented, use --build during beta\n')
       // prebuiltBinary = await this._fetchPrebuiltBinaryAsync(target)
     }
-    if (!prebuiltBinary) {
-      prebuiltBinary = await this._buildAsync()
+    if (!binary) {
+      binary = await this._buildAsync()
       step.log('Node binary compiled')
     }
-    return this._assembleDeliverable(header, prebuiltBinary)
+    return this._assembleDeliverable(header, binary)
   }
 
   private _assembleDeliverable(header: NexeHeader, binary: NodeJS.ReadableStream) {
-    const haystack = new Needle(Buffer.concat([Buffer.from('/**'), needle]))
     const artifact = new Readable({ read() {} })
-    let needles = 0
-    let currentStackSize = 0
-    binary.pipe(haystack)
-    haystack
-      .on('close', () => artifact.push(null))
-      .on('needle', () => ++needles && haystack.needle(needle))
-      .on('haystack', (x: Buffer) => {
-        if (!needles) {
-          currentStackSize += x.length
-          artifact.push(x)
-        }
-        if (needles === 1 && !+header.binaryOffset) {
-          header.binaryOffset = padLeft(currentStackSize)
-          const content = Buffer.from(inflate(this._getPayload(header), +header.paddingSize) + tail)
-          artifact.push(content)
-        }
-        if (needles > 2) {
-          artifact.push(x)
-        }
-      })
+    binary.on('data', (chunk: Buffer) => {
+      artifact.push(chunk)
+    })
+    binary.on('close', () => {
+      const content = this._getPayload(header)
+      artifact.push(content)
+      artifact.push(padLeft(content.length))
+      artifact.push(null)
+    })
     return artifact
   }
 }
